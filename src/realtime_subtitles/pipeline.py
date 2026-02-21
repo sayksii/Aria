@@ -15,7 +15,7 @@ import numpy as np
 from .audio.capture import AudioCapture
 from .audio.buffer import StreamingAudioBuffer, SimpleAudioBuffer
 from .transcription.whisper_transcriber import WhisperTranscriber, TranscriptionResult
-from .logger import info, debug, warning, error
+from .logger import info, debug, warning, error, transcript, get_console_mode
 
 # Translation support (optional)
 try:
@@ -24,6 +24,11 @@ try:
 except ImportError:
     TRANSLATION_AVAILABLE = False
     create_translator = None
+
+try:
+    from opencc import OpenCC
+except Exception:
+    OpenCC = None
 
 
 @dataclass
@@ -76,6 +81,8 @@ class RealtimePipeline:
         enable_translation: bool = False,
         translation_engine: str = "google",
         target_language: str = "zh",
+        audio_source: str = "system",
+        chinese_script: Optional[str] = None,
     ):
         """
         Initialize the pipeline.
@@ -97,13 +104,29 @@ class RealtimePipeline:
         self.enable_translation = enable_translation
         self.translation_engine = translation_engine
         self.target_language = target_language
+        self.chinese_script = chinese_script
+        self._script_converter = None
         
         # Components
-        self._audio_capture = AudioCapture()
+        self._audio_capture = AudioCapture(
+            source=audio_source,
+        )
         self._transcriber = WhisperTranscriber(
             model_size=model,
             language=language,
         )
+
+        if chinese_script in ("simplified", "traditional"):
+            if OpenCC is None:
+                warning("Pipeline: OpenCC not installed; Chinese script normalization disabled")
+            else:
+                try:
+                    cfg = "t2s" if chinese_script == "simplified" else "s2t"
+                    self._script_converter = OpenCC(cfg)
+                    info(f"Pipeline: Chinese script normalization enabled ({chinese_script})")
+                except Exception as e:
+                    warning(f"Pipeline: Failed to init OpenCC: {e}")
+                    self._script_converter = None
         
         # Translation (optional)
         self._translator = None
@@ -221,6 +244,16 @@ class RealtimePipeline:
                     warning(f"Pipeline: Dropped {self._dropped_segments} segments (transcription can't keep up)")
             except queue.Empty:
                 pass
+
+    def _normalize_chinese_script(self, text: str) -> str:
+        if not text:
+            return text
+        if self._script_converter is None:
+            return text
+        try:
+            return self._script_converter.convert(text)
+        except Exception:
+            return text
     
     def _transcription_loop(self) -> None:
         """Background thread for transcription."""
@@ -246,12 +279,18 @@ class RealtimePipeline:
                 result = self._transcriber.transcribe(audio)
                 
                 if result.text.strip():
-                    text = result.text.strip()
+                    text = self._normalize_chinese_script(result.text.strip())
                     
                     # Split text into lines, keep only last max_lines
                     lines = self._split_into_lines(text, max_chars_per_line=45)
                     display_lines = lines[-self.max_lines:]  # Only show last 5 lines
                     display_text = "\n".join(display_lines)
+
+                    # Always write original transcript to simple session log.
+                    transcript(text)
+                    # Verbose console keeps detailed transcript line.
+                    if get_console_mode() != "simple":
+                        info(f"Pipeline: Transcript: {text}")
                     
                     # Translate if enabled
                     translated_display = None
@@ -263,7 +302,9 @@ class RealtimePipeline:
                                 trans_lines = self._split_into_lines(translated, max_chars_per_line=45)
                                 trans_display_lines = trans_lines[-self.max_lines:]
                                 translated_display = "\n".join(trans_display_lines)
-                                debug(f"Pipeline: Translated: {text[:30]}... -> {translated[:30]}...")
+                                debug(f"Pipeline: Translated: {text} -> {translated}")
+                                # Always write translation to simple session log.
+                                transcript(translated)
                         except Exception as e:
                             warning(f"Pipeline: Translation error: {e}")
                     

@@ -17,11 +17,16 @@ class SettingsManager:
         "model": "large-v3",
         "language": None,
         "vad_enabled": True,
+        "use_vad": True,
         "vad_silence_ms": 100,
         "min_duration": 100,
         "enable_translation": True,
         "translation_engine": "bing",
         "target_language": "zho_Hans",
+        "audio_source": "system",
+        "timezone": "system",
+        "overlay_visible": True,
+        "console_mode": "verbose",
     }
     
     def __init__(self):

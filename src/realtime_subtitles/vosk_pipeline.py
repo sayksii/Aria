@@ -15,7 +15,7 @@ import numpy as np
 
 from .audio.capture import AudioCapture
 from .pipeline import SubtitleEvent
-from .logger import info, debug, warning, error
+from .logger import info, debug, warning, error, transcript
 
 # Import transcribers with fallbacks
 try:
@@ -69,6 +69,7 @@ class StreamingPipeline:
         enable_translation: bool = False,
         translation_engine: str = "google",
         target_language: str = "zh",
+        audio_source: str = "system",
     ):
         """
         Initialize the streaming pipeline.
@@ -123,7 +124,9 @@ class StreamingPipeline:
                 self._state_manager = None
         
         # Audio capture
-        self._audio_capture = AudioCapture()
+        self._audio_capture = AudioCapture(
+            source=audio_source,
+        )
         
         # State
         self._running = False
@@ -171,6 +174,8 @@ class StreamingPipeline:
             with self._text_lock:
                 self._latest_raw_text = raw_text
                 self._new_text_event.set()  # Signal translation thread
+
+            transcript(raw_text)
             
             # If no translation is enabled, we need to emit here immediately
             # otherwise we won't see anything. 
@@ -211,6 +216,10 @@ class StreamingPipeline:
             try:
                 # BLOCKS HERE: TranslationStateManager calls network translator
                 state = self._state_manager.process_text(raw_text)
+                if state.committed_text:
+                    transcript(state.committed_text)
+                if state.draft_text:
+                    transcript(state.draft_text)
                 
                 # Emit translated event
                 event = SubtitleEvent(

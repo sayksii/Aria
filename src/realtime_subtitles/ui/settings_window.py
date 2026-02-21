@@ -7,7 +7,7 @@ A modern, beautiful settings interface.
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QFrame, QCheckBox, QSlider,
-    QMessageBox, QApplication
+    QMessageBox, QApplication, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QIcon
@@ -18,6 +18,8 @@ import sys
 from ..settings_manager import get_settings_manager
 from .model_manager_window import show_model_manager
 from ..i18n import t, get_current_language, set_language, LANGUAGES
+from ..timezone_utils import available_timezone_names, validate_timezone_name
+from ..audio.capture import AudioCapture
 
 
 class SettingsWindow(QMainWindow):
@@ -26,6 +28,8 @@ class SettingsWindow(QMainWindow):
     # Model options
     MODEL_IDS = ["large-v3", "large-v3-turbo", "medium"]
     LANGUAGE_CODES = [None, "zh", "en", "ja", "ko", "yue", "es", "fr", "de"]
+    SYSTEM_AUDIO_LABEL = "Windows 正在播放的声音"
+    MIC_DEFAULT_LABEL = "麦克风（系统默认）"
     
     # Signal for thread-safe updates
     status_update = pyqtSignal(str, str)  # text, color
@@ -61,7 +65,8 @@ class SettingsWindow(QMainWindow):
         """Get languages list with translated display names."""
         return [
             (t("auto_detect"), None),
-            (t("lang_chinese"), "zh"),
+            ("中文（简体）", "zh_hans"),
+            ("中文（繁体）", "zh_hant"),
             (t("lang_english"), "en"),
             (t("lang_japanese"), "ja"),
             (t("lang_korean"), "ko"),
@@ -84,7 +89,12 @@ class SettingsWindow(QMainWindow):
     def LANGUAGES(self):
         return self._get_languages()
     
-    def __init__(self, on_start: Callable[[dict], None], on_quit: Optional[Callable[[], None]] = None):
+    def __init__(
+        self,
+        on_start: Callable[[dict], None],
+        on_quit: Optional[Callable[[], None]] = None,
+        on_toggle_overlay: Optional[Callable[[], bool]] = None,
+    ):
         """Initialize the settings window.
         
         Args:
@@ -95,12 +105,14 @@ class SettingsWindow(QMainWindow):
         
         self.on_start = on_start
         self.on_quit = on_quit
+        self.on_toggle_overlay = on_toggle_overlay
         self._is_running = False
         self._loading = True
         
         # Window setup
         self.setWindowTitle("ARIA")
-        self.setFixedSize(820, 620)  # Slightly wider to accommodate better spacing
+        self.setMinimumSize(820, 620)
+        self.resize(860, 700)
         self.setStyleSheet(self._get_stylesheet())
         
         # Center on screen
@@ -234,8 +246,12 @@ class SettingsWindow(QMainWindow):
         # Left column
         left_col = QVBoxLayout()
         left_col.setSpacing(15)
-        left_col.addWidget(self._create_recognition_card())
-        left_col.addWidget(self._create_model_card())
+        self.recognition_card = self._create_recognition_card()
+        self.model_card = self._create_model_card()
+        left_col.addWidget(self.recognition_card, 0)
+        left_col.addWidget(self.model_card, 1)
+        left_col.setStretch(0, 0)
+        left_col.setStretch(1, 1)
         columns.addLayout(left_col, 1)  # Equal weight
         
         # Right column
@@ -300,7 +316,7 @@ class SettingsWindow(QMainWindow):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_container.addWidget(title)
         
-        subtitle = QLabel(t("subtitle") + " | v2.0.0")
+        subtitle = QLabel(t("subtitle") + " | v2.0.1")
         subtitle.setStyleSheet("color: #aaaaaa; font-size: 12px;")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_container.addWidget(subtitle)
@@ -342,12 +358,18 @@ class SettingsWindow(QMainWindow):
     def _create_recognition_card(self):
         """Create recognition settings card."""
         card, layout = self._create_card(t("recognition_settings"))
+        card.setMinimumHeight(250)
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         
         # Mode selector (Precise / Realtime)
         mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(10)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
         mode_layout.addStretch()
         
         self.mode_precise_btn = QPushButton(t("mode_precise"))
+        self.mode_precise_btn.setMinimumWidth(92)
+        self.mode_precise_btn.setMinimumHeight(38)
         self.mode_precise_btn.setCheckable(True)
         self.mode_precise_btn.setChecked(True)
         self.mode_precise_btn.setStyleSheet("""
@@ -373,6 +395,8 @@ class SettingsWindow(QMainWindow):
         mode_layout.addWidget(self.mode_precise_btn)
         
         self.mode_realtime_btn = QPushButton(t("mode_realtime"))
+        self.mode_realtime_btn.setMinimumWidth(92)
+        self.mode_realtime_btn.setMinimumHeight(38)
         self.mode_realtime_btn.setCheckable(True)
         self.mode_realtime_btn.setStyleSheet("""
             QPushButton {
@@ -397,6 +421,8 @@ class SettingsWindow(QMainWindow):
         mode_layout.addWidget(self.mode_realtime_btn)
         
         self.mode_livecaptions_btn = QPushButton(t("mode_livecaptions"))
+        self.mode_livecaptions_btn.setMinimumWidth(92)
+        self.mode_livecaptions_btn.setMinimumHeight(38)
         self.mode_livecaptions_btn.setCheckable(True)
         self.mode_livecaptions_btn.setStyleSheet("""
             QPushButton {
@@ -428,7 +454,28 @@ class SettingsWindow(QMainWindow):
         self.mode_desc.setStyleSheet("color: #aaaaaa; font-size: 12px;")
         self.mode_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.mode_desc)
-        
+
+        # Audio source selector
+        source_row = QHBoxLayout()
+        source_row.addWidget(QLabel("音频来源:"))
+        self.audio_source_dropdown = QComboBox()
+        self._populate_audio_source_dropdown()
+        self.audio_source_dropdown.currentTextChanged.connect(self._on_audio_source_change)
+        source_row.addWidget(self.audio_source_dropdown)
+        source_row.addStretch()
+        layout.addLayout(source_row)
+
+        tz_row = QHBoxLayout()
+        tz_row.addWidget(QLabel("Timezone (IANA):"))
+        self.timezone_dropdown = QComboBox()
+        self.timezone_dropdown.setEditable(True)
+        self.timezone_dropdown.addItem("system")
+        self.timezone_dropdown.addItems(available_timezone_names())
+        self.timezone_dropdown.currentTextChanged.connect(lambda _: self._persist_ui_settings())
+        tz_row.addWidget(self.timezone_dropdown)
+        tz_row.addStretch()
+        layout.addLayout(tz_row)
+
         return card
     
     def _create_model_card(self):
@@ -554,6 +601,28 @@ class SettingsWindow(QMainWindow):
         
         button_row = QHBoxLayout()
         button_row.setSpacing(10)
+
+        quick_row = QHBoxLayout()
+        quick_row.setSpacing(10)
+
+        self.overlay_toggle_button = QPushButton("隐藏字幕悬浮窗")
+        self.overlay_toggle_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid #555555;
+                color: #aaaaaa;
+                border-radius: 8px;
+                padding: 10px 20px;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+                border-color: #3B8ED0;
+            }
+        """)
+        self.overlay_toggle_button.clicked.connect(self._on_toggle_overlay)
+        quick_row.addWidget(self.overlay_toggle_button)
+
+        layout.addLayout(quick_row)
         
         self.reset_button = QPushButton("🔄 " + t("reset_settings"))
         self.reset_button.setStyleSheet("""
@@ -716,7 +785,48 @@ class SettingsWindow(QMainWindow):
             self.vad_status.setText("OFF")
             self.vad_status.setStyleSheet("color: #888888;")
         self._persist_ui_settings()
-    
+
+    def _on_audio_source_change(self, _value: str):
+        """Handle audio source change."""
+        self._persist_ui_settings()
+
+    def _get_selected_audio_source(self) -> str:
+        """Get selected audio source key from dropdown."""
+        data = self.audio_source_dropdown.currentData()
+        if isinstance(data, str) and data:
+            return data
+
+        return "system"
+
+    def _populate_audio_source_dropdown(self, preferred_source: Optional[str] = None) -> None:
+        """Populate audio source dropdown with system and microphone devices."""
+        selected_source = preferred_source or self._get_selected_audio_source()
+        if selected_source == "ts_tail":
+            selected_source = "system"
+        self.audio_source_dropdown.blockSignals(True)
+        self.audio_source_dropdown.clear()
+
+        # Keep existing logic options first.
+        self.audio_source_dropdown.addItem(self.SYSTEM_AUDIO_LABEL, "system")
+        self.audio_source_dropdown.addItem(self.MIC_DEFAULT_LABEL, AudioCapture.MIC_DEFAULT_SOURCE)
+
+        for mic in AudioCapture.list_microphone_devices():
+            idx = mic.get("index")
+            name = (mic.get("name") or "").strip()
+            if idx is None or not name:
+                continue
+            label = f"麦克风: {name}"
+            if mic.get("is_default"):
+                label = f"麦克风（默认设备）: {name}"
+            self.audio_source_dropdown.addItem(label, f"{AudioCapture.MIC_SOURCE_PREFIX}{idx}")
+
+        index = self.audio_source_dropdown.findData(selected_source)
+        if index < 0:
+            index = self.audio_source_dropdown.findData("system")
+        if index >= 0:
+            self.audio_source_dropdown.setCurrentIndex(index)
+        self.audio_source_dropdown.blockSignals(False)
+
     def _on_manage_models(self):
         """Open model manager window."""
         show_model_manager(self)
@@ -748,7 +858,14 @@ class SettingsWindow(QMainWindow):
             self.on_quit()
         else:
             QApplication.quit()
-    
+
+    def _on_toggle_overlay(self):
+        """Toggle subtitle overlay visibility."""
+        if not self.on_toggle_overlay:
+            return
+        is_visible = self.on_toggle_overlay()
+        self.overlay_toggle_button.setText("隐藏字幕悬浮窗" if is_visible else "显示字幕悬浮窗")
+
     def _on_ui_language_change(self, lang_display: str):
         """Handle UI language change."""
         # Find language code from display name
@@ -835,16 +952,21 @@ class SettingsWindow(QMainWindow):
             t("engine_youdao"): "youdao",
         }
         engine = engine_map.get(engine_display, "nllb")  # Default to NLLB
+        tz_name = self.timezone_dropdown.currentText().strip() or "system"
+        if not validate_timezone_name(tz_name):
+            tz_name = "system"
         
         settings = {
             "mode": mode,
             "model": model_id,
             "language": lang_code,
+            "timezone": tz_name,
             "use_vad": self.vad_checkbox.isChecked(),
             "vad_silence_ms": 100 if mode == "precise" else 500,
             "enable_translation": self.trans_checkbox.isChecked(),
             "translation_engine": engine,
             "target_language": target_lang,
+            "audio_source": self._get_selected_audio_source(),
         }
         
         # Save settings
@@ -898,6 +1020,9 @@ class SettingsWindow(QMainWindow):
                     break
             # Load language
             lang_code = sm.get("language", None)
+            if lang_code == "zh":
+                # Backward compatibility with old single Chinese option
+                lang_code = "zh_hans"
             for display, lcode in self.LANGUAGES:
                 if lcode == lang_code:
                     self.lang_dropdown.setCurrentText(display)
@@ -945,6 +1070,19 @@ class SettingsWindow(QMainWindow):
         
         # VAD
         self.vad_checkbox.setChecked(sm.get("use_vad", True))
+
+        tz_name = sm.get("timezone", "system") or "system"
+        if not validate_timezone_name(tz_name):
+            tz_name = "system"
+        self.timezone_dropdown.setCurrentText(tz_name)
+
+        # Audio source
+        audio_source = sm.get("audio_source", "system")
+        self._populate_audio_source_dropdown(preferred_source=audio_source)
+
+        # Overlay toggle state
+        overlay_visible = sm.get("overlay_visible", True)
+        self.overlay_toggle_button.setText("隐藏字幕悬浮窗" if overlay_visible else "显示字幕悬浮窗")
     
     # === Public API ===
     

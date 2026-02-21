@@ -18,6 +18,9 @@ from ..vosk_pipeline import StreamingPipeline
 from ..livecaptions.pipeline import LiveCaptionsPipeline
 from ..model_manager import ModelManager, ModelType, ModelStatus
 from ..i18n import t
+from ..settings_manager import get_settings_manager
+from ..logger import set_console_mode, start_simple_log_session
+from ..timezone_utils import set_app_timezone_name
 
 
 class PipelineSignals(QObject):
@@ -45,6 +48,7 @@ class App:
         self._is_streaming_mode = False
         self._is_livecaptions_mode = False
         self._enable_translation = False
+        self._overlay_visible = True
         
         # For precise mode multi-line display
         self._subtitle_lines: list = []
@@ -65,7 +69,16 @@ class App:
         self._app.setFont(QFont("Segoe UI", 9))
         
         # Create settings window
-        self._settings_window = SettingsWindow(on_start=self._on_start, on_quit=self._cleanup_and_quit)
+        sm = get_settings_manager()
+        self._overlay_visible = sm.get("overlay_visible", True)
+        set_console_mode(sm.get("console_mode", "verbose"))
+        set_app_timezone_name(sm.get("timezone", "system"))
+
+        self._settings_window = SettingsWindow(
+            on_start=self._on_start,
+            on_quit=self._cleanup_and_quit,
+            on_toggle_overlay=self._toggle_overlay_visibility,
+        )
         self._settings_window.show()
         
         # Handle window close
@@ -129,6 +142,12 @@ class App:
         
         # Save settings for tray toggle
         self._last_settings = settings
+        # Re-sync overlay visibility from persisted settings to avoid stale state.
+        sm = get_settings_manager()
+        self._overlay_visible = sm.get("overlay_visible", self._overlay_visible)
+        set_app_timezone_name(settings.get("timezone", "system"))
+        # Create a new simple log file for this start run.
+        start_simple_log_session()
         
         # Check mode
         mode = settings.get("mode", "precise")
@@ -176,6 +195,13 @@ class App:
                 self._overlay.set_multiline_mode(True)
                 if self._translation_overlay:
                     self._translation_overlay.set_multiline_mode(True)
+
+        # Apply hidden state immediately so start won't pop overlays when disabled.
+        if not self._overlay_visible:
+            if self._overlay:
+                self._overlay.hide()
+            if self._translation_overlay:
+                self._translation_overlay.hide()
         
         # Create pipeline
         def create_pipeline():
@@ -198,17 +224,28 @@ class App:
                         enable_translation=self._enable_translation,
                         translation_engine=settings.get("translation_engine", "google"),
                         target_language=settings.get("target_language", "zho_Hant"),
+                        audio_source=settings.get("audio_source", "system"),
                     )
                 else:
                     # Use precise mode (Whisper)
+                    raw_lang = settings.get("language")
+                    whisper_lang = "zh" if raw_lang in ("zh_hans", "zh_hant") else raw_lang
+                    chinese_script = None
+                    if raw_lang == "zh_hans":
+                        chinese_script = "simplified"
+                    elif raw_lang == "zh_hant":
+                        chinese_script = "traditional"
+
                     self._pipeline = RealtimePipeline(
                         model=settings.get("model", "large-v3"),
-                        language=settings.get("language"),
+                        language=whisper_lang,
                         use_vad=settings.get("use_vad", True),
                         vad_silence_ms=settings.get("vad_silence_ms", 100),
                         enable_translation=self._enable_translation,
                         translation_engine=settings.get("translation_engine", "google"),
                         target_language=settings.get("target_language", "zho_Hant"),
+                        audio_source=settings.get("audio_source", "system"),
+                        chinese_script=chinese_script,
                         on_subtitle=lambda e: self._signals.subtitle.emit(e),
                     )
                 
@@ -231,6 +268,15 @@ class App:
         self._settings_window.show_running()
         
         # Show overlays based on mode
+        if not self._overlay_visible:
+            if self._overlay:
+                self._overlay.hide()
+            if self._translation_overlay:
+                self._translation_overlay.hide()
+            if self._tray:
+                self._tray.update_status(True)
+            return
+
         if self._is_livecaptions_mode:
             # LiveCaptions mode: only show translation overlay
             if self._translation_overlay:
@@ -253,6 +299,8 @@ class App:
     def _on_subtitle(self, event: SubtitleEvent) -> None:
         """Handle subtitle events from pipeline."""
         if not self._is_running:
+            return
+        if not self._overlay_visible:
             return
         
         # For LiveCaptions mode, only update translation overlay
@@ -426,6 +474,26 @@ class App:
         
         return False
 
+    def _toggle_overlay_visibility(self) -> bool:
+        """Toggle subtitle overlay visibility and persist setting."""
+        self._overlay_visible = not self._overlay_visible
+        sm = get_settings_manager()
+        sm.set("overlay_visible", self._overlay_visible)
+        sm.save()
+
+        if self._overlay:
+            if self._overlay_visible and self._is_running and not self._is_livecaptions_mode:
+                self._overlay.show()
+            else:
+                self._overlay.hide()
+
+        if self._translation_overlay:
+            if self._overlay_visible and self._is_running:
+                self._translation_overlay.show()
+            else:
+                self._translation_overlay.hide()
+
+        return self._overlay_visible
 
 def run_app():
     """Entry point for the GUI application."""

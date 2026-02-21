@@ -11,6 +11,7 @@ from typing import Callable, Optional, List
 from dataclasses import dataclass
 from collections import deque
 import numpy as np
+from ..logger import debug
 
 
 @dataclass
@@ -94,7 +95,6 @@ class StreamingAudioBuffer:
             maxlen=int(self.SAMPLE_RATE * speech_pad_ms / 1000)
         )
         
-        from ..logger import debug
         debug(f"Buffer: Initialized min={min_segment_duration}s, max={max_segment_duration}s, VAD={use_vad}")
     
     def _get_buffer_duration(self) -> float:
@@ -147,7 +147,7 @@ class StreamingAudioBuffer:
                 if not self._speech_started:
                     self._speech_started = True
                     self._speech_start_time = current_time
-                    print("[Buffer] Speech started")
+                    debug("Buffer: Speech started")
                 
                 self._silence_start_time = None
                 self._buffer.append(audio)
@@ -174,7 +174,7 @@ class StreamingAudioBuffer:
                         # Release lock before print/callback to avoid blocking
                         
                         if audio_to_process is not None:
-                            print(f"[Buffer] Speech ended, triggering transcription ({duration:.1f}s)")
+                            debug(f"Buffer: Speech ended, triggering transcription ({duration:.1f}s)")
                             threading.Thread(
                                 target=self.on_segment_ready,
                                 args=(audio_to_process,),
@@ -195,7 +195,7 @@ class StreamingAudioBuffer:
                 audio_to_process = self._flush_buffer_unlocked()
             
             if audio_to_process is not None:
-                print(f"[Buffer] Max duration reached, triggering transcription ({buffer_duration:.1f}s)")
+                debug(f"Buffer: Max duration reached, triggering transcription ({buffer_duration:.1f}s)")
                 threading.Thread(
                     target=self.on_segment_ready,
                     args=(audio_to_process,),
@@ -221,7 +221,7 @@ class StreamingAudioBuffer:
         if self._vad is not None:
             self._vad.reset()
         
-        print("[Buffer] Reset")
+        debug("Buffer: Reset")
 
 
 class SimpleAudioBuffer:

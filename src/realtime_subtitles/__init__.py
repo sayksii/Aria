@@ -11,5 +11,5 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["HF_HUB_DISABLE_TQDM"] = "1"
 os.environ["TQDM_DISABLE"] = "1"
 
-__version__ = "1.0.0"
+__version__ = "2.0.1"
 __author__ = "sayksii"
