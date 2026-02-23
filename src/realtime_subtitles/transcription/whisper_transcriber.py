@@ -121,7 +121,7 @@ class WhisperTranscriber:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
         if compute_type == "auto":
-            compute_type = "float16" if device == "cuda" else "int8"
+            compute_type = "auto" if device == "cuda" else "int8"
             
         self._device = device
         self._compute_type = compute_type
